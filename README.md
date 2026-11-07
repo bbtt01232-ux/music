@@ -1,21 +1,19 @@
-# CKRPRO MUSIC — Vercel
+# CKRPRO MUSIC (Vercel)
 
 ## Deploy
-1. Push to GitHub
-2. Vercel → Import project
-3. Framework: Other
-4. Deploy
+```bash
+vercel --prod
+```
 
-## Local / Termux
+## Fix applied
+- Audio resolve: **Piped → Cobalt → yt-dlp** (multi fallback)
+- yt-dlp multi player clients: ios, android, mweb, tv, web
+- Search also falls back to Piped if yt-dlp fails
+- Requirements pin recent yt-dlp
+
+## Local test
 ```bash
 pip install -r requirements.txt
 python app.py
+# open http://127.0.0.1:5000
 ```
-
-Open http://127.0.0.1:5000
-
-## Features
-- Real WhatsApp + YouTube icons
-- Clean UI (no glow / no borders)
-- Background play (lock screen + recent apps)
-- Media Session controls
