@@ -1,8 +1,6 @@
-import os, re, time, threading, json
+import os, re, time, threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from flask import Flask, jsonify, request, Response
-from urllib.request import Request, urlopen
-from urllib.error import HTTPError, URLError
 
 try:
     import yt_dlp
@@ -15,297 +13,144 @@ app = Flask(__name__)
 pool = ThreadPoolExecutor(max_workers=4)
 lock = threading.RLock()
 cache = {}
-TRENDING = [
-    "Nepali rap hits", "Lil Buddha rap", "Sacar rap", "Vten hip hop",
-    "Uniq Poet", "Yama Buddha", "Chirag Khadka rap", "Nepali hip hop new",
-]
+TRENDING = ["Nepali rap hits","Lil Buddha rap","Sacar rap","Vten hip hop","Uniq Poet","Yama Buddha","Chirag Khadka rap","Nepali hip hop new"]
 VID = re.compile(r"^[A-Za-z0-9_-]{6,20}$")
 
-# Public Piped instances (audio stream fallback when yt-dlp fails on Vercel)
-PIPED_APIS = [
-    "https://pipedapi.kavin.rocks",
-    "https://pipedapi.adminforge.de",
-    "https://api.piped.private.coffee",
-    "https://pipedapi.in.projectsegfau.lt",
-]
+# 🔥 Vercel मा Cookies ह्यान्डल गर्ने फंक्शन
+def setup_cookies():
+    cookie_content = os.environ.get("YT_COOKIES", "").strip()
+    if cookie_content:
+        try:
+            with open("/tmp/cookies.txt", "w", encoding="utf-8") as f:
+                f.write(cookie_content)
+            print("✅ Cookies written to /tmp/cookies.txt")
+        except Exception as e:
+            print(f"❌ Failed to write cookies: {e}")
+    else:
+        print("⚠️ WARNING: YT_COOKIES env var is empty. YouTube bot check will likely fail.")
+
+# स्टार्टअपमा कुकीज लोड गर्ने
+setup_cookies()
 
 def get(key, ttl):
     with lock:
         x = cache.get(key)
-        if not x:
-            return None
-        if time.time() - x["at"] > ttl:
-            cache.pop(key, None)
-            return None
+        if not x: return None
+        if time.time()-x["at"] > ttl:
+            cache.pop(key, None); return None
         return x["value"]
 
 def put(key, value):
     with lock:
-        cache[key] = {"at": time.time(), "value": value}
-        if len(cache) > 500:
-            for k, _ in sorted(cache.items(), key=lambda z: z[1]["at"])[:100]:
-                cache.pop(k, None)
+        cache[key] = {"at":time.time(),"value":value}
+        if len(cache)>500:
+            for k,_ in sorted(cache.items(),key=lambda z:z[1]["at"])[:100]: cache.pop(k,None)
 
-def _http_json(url, timeout=12, method="GET", data=None, headers=None):
-    hdrs = {
-        "User-Agent": "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/120.0.0.0 Mobile Safari/537.36",
-        "Accept": "application/json",
-    }
-    if headers:
-        hdrs.update(headers)
-    body = None
-    if data is not None:
-        body = data if isinstance(data, (bytes, bytearray)) else json.dumps(data).encode()
-        hdrs.setdefault("Content-Type", "application/json")
-    req = Request(url, data=body, headers=hdrs, method=method)
-    with urlopen(req, timeout=timeout) as r:
-        return json.loads(r.read().decode("utf-8", "replace"))
-
-def opts(flat=False, client="ios"):
+# 🔥 अपडेट गरिएको opts फंक्शन (Cookies र iOS/Web Player सहित)
+def opts(flat=False):
     d = {
-        "quiet": True,
-        "no_warnings": True,
-        "noplaylist": True,
-        "socket_timeout": 18,
-        "retries": 2,
-        "extractor_retries": 2,
-        "nocheckcertificate": True,
-        "geo_bypass": True,
-        "http_headers": {
-            "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15",
-            "Accept-Language": "en-US,en;q=0.9",
-        },
+        "quiet": True, "no_warnings": True, "noplaylist": True,
+        "socket_timeout": 12, "retries": 1, "extractor_retries": 1,
+        # Android लाई हटाएर iOS र Web राखिएको छ
+        "extractor_args": {"youtube": {"player_client": ["ios", "web"]}}
     }
+    
+    # यदि कुकीज फाइल बनेको छ भने प्रयोग गर्ने
+    cookie_file = "/tmp/cookies.txt"
+    if os.path.exists(cookie_file):
+        d["cookiefile"] = cookie_file
+
     if flat:
-        d.update(skip_download=True, extract_flat="in_playlist", default_search="ytsearch")
+        d.update(skip_download=True, extract_flat=True, default_search="ytsearch")
     else:
-        d.update(
-            skip_download=True,
-            format="bestaudio[ext=m4a]/bestaudio[acodec!=none]/bestaudio/best",
-            extractor_args={"youtube": {"player_client": [client]}},
-        )
+        # ffmpeg नचाहिने format मात्र राखिएको छ
+        d.update(skip_download=True, format="bestaudio[ext=m4a]/bestaudio/best")
     return d
 
 def search(q, limit=20):
-    q = (q or "").strip()[:160]
-    if not q:
+    q=(q or "").strip()[:160]
+    if not q or not YTDLP: return []
+    key=f"s:{q.casefold()}:{limit}"
+    old=get(key,600)
+    if old is not None: return old
+    try:
+        with yt_dlp.YoutubeDL(opts(True)) as y: info=y.extract_info(f"ytsearch{limit}:{q}",download=False) or {}
+        out=[]
+        for e in info.get("entries") or []:
+            if not e: continue
+            vid=str(e.get("id") or "")
+            if not VID.fullmatch(vid): continue
+            thumbs=sorted([t for t in e.get("thumbnails",[]) if t.get("url")],key=lambda t:t.get("width") or 0,reverse=True)
+            out.append({"id":vid,"title":e.get("title") or "Untitled","artist":e.get("uploader") or e.get("channel") or "YouTube","duration":e.get("duration"),"thumbnail":thumbs[0]["url"] if thumbs else f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg"})
+        put(key,out); return out
+    except Exception as e:
+        print(f"Search failed: {e}")
         return []
-    key = f"s:{q.casefold()}:{limit}"
-    old = get(key, 600)
-    if old is not None:
-        return old
-    out = []
-    # 1) yt-dlp search
-    if YTDLP:
-        try:
-            with yt_dlp.YoutubeDL(opts(True)) as y:
-                info = y.extract_info(f"ytsearch{limit}:{q}", download=False) or {}
-            for e in info.get("entries") or []:
-                if not e:
-                    continue
-                vid = str(e.get("id") or "")
-                if not VID.fullmatch(vid):
-                    continue
-                thumbs = sorted(
-                    [t for t in e.get("thumbnails", []) if t.get("url")],
-                    key=lambda t: t.get("width") or 0,
-                    reverse=True,
-                )
-                out.append({
-                    "id": vid,
-                    "title": e.get("title") or "Untitled",
-                    "artist": e.get("uploader") or e.get("channel") or "YouTube",
-                    "duration": e.get("duration"),
-                    "thumbnail": thumbs[0]["url"] if thumbs else f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg",
-                })
-        except Exception:
-            app.logger.exception("yt-dlp search failed")
-    # 2) Piped search fallback
-    if not out:
-        for base in PIPED_APIS:
-            try:
-                data = _http_json(f"{base}/search?q={q}&filter=videos", timeout=10)
-                items = data if isinstance(data, list) else data.get("items") or data.get("results") or []
-                for e in items:
-                    vid = str(e.get("url") or e.get("id") or "").replace("/watch?v=", "").split("v=")[-1]
-                    vid = vid.split("&")[0].strip("/")
-                    if not VID.fullmatch(vid):
-                        continue
-                    out.append({
-                        "id": vid,
-                        "title": e.get("title") or "Untitled",
-                        "artist": (e.get("uploaderName") or e.get("uploader") or "YouTube"),
-                        "duration": e.get("duration"),
-                        "thumbnail": (e.get("thumbnail") or f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg"),
-                    })
-                    if len(out) >= limit:
-                        break
-                if out:
-                    break
-            except Exception:
-                continue
-    put(key, out)
-    return out
 
 def trending():
-    jobs = [pool.submit(search, q, 12) for q in TRENDING]
-    out, seen = [], set()
+    jobs=[pool.submit(search,q,12) for q in TRENDING]
+    out=[]; seen=set()
     for job in as_completed(jobs):
         try:
             for t in job.result():
-                if t["id"] not in seen:
-                    seen.add(t["id"])
-                    out.append(t)
-        except Exception:
-            pass
+                if t["id"] not in seen: seen.add(t["id"]); out.append(t)
+        except Exception: pass
     return out[:80]
 
-def _pick_audio_url(info):
-    url = info.get("url")
-    if url:
-        return url
-    formats = info.get("formats") or []
-    # Prefer pure audio
-    audio = [f for f in formats if f.get("url") and f.get("acodec") not in (None, "none") and f.get("vcodec") in (None, "none")]
-    if audio:
-        audio.sort(key=lambda f: f.get("abr") or f.get("tbr") or 0, reverse=True)
-        return audio[0]["url"]
-    # Any format with audio
-    mixed = [f for f in formats if f.get("url") and f.get("acodec") not in (None, "none")]
-    if mixed:
-        mixed.sort(key=lambda f: f.get("tbr") or 0, reverse=True)
-        return mixed[0]["url"]
-    return None
-
-def resolve_ytdlp(vid):
-    if not YTDLP:
-        return None
-    clients = ["ios", "android", "mweb", "tv", "web"]
-    for client in clients:
-        try:
-            with yt_dlp.YoutubeDL(opts(False, client)) as y:
-                info = y.extract_info(f"https://www.youtube.com/watch?v={vid}", download=False) or {}
-            url = _pick_audio_url(info)
-            if url:
-                return url
-        except Exception:
-            continue
-    return None
-
-def resolve_piped(vid):
-    for base in PIPED_APIS:
-        try:
-            data = _http_json(f"{base}/streams/{vid}", timeout=12)
-            # audioStreams preferred
-            streams = data.get("audioStreams") or []
-            streams = sorted(streams, key=lambda s: s.get("bitrate") or 0, reverse=True)
-            for s in streams:
-                u = s.get("url")
-                if u:
-                    return u
-            # adaptive/video with audio
-            for s in data.get("adaptiveFormats") or data.get("videoStreams") or []:
-                if s.get("url") and (s.get("bitrate") or s.get("quality")):
-                    # skip pure video if possible
-                    if s.get("videoOnly"):
-                        continue
-                    return s["url"]
-            if data.get("hls"):
-                return data["hls"]
-        except Exception:
-            continue
-    return None
-
-def resolve_cobalt(vid):
-    """Cobalt public API — good Vercel fallback."""
-    endpoints = [
-        "https://api.cobalt.tools/",
-        "https://cobalt-api.kwiatekmike.com/",
-    ]
-    payload = {
-        "url": f"https://www.youtube.com/watch?v={vid}",
-        "downloadMode": "audio",
-        "audioFormat": "mp3",
-        "audioBitrate": "128",
-    }
-    for ep in endpoints:
-        try:
-            data = _http_json(
-                ep,
-                timeout=15,
-                method="POST",
-                data=payload,
-                headers={"Accept": "application/json"},
-            )
-            # new cobalt: status + url
-            if data.get("status") in ("tunnel", "redirect", "stream") and data.get("url"):
-                return data["url"]
-            if data.get("url"):
-                return data["url"]
-        except Exception:
-            continue
-    return None
-
 def resolve(vid):
-    vid = (vid or "").strip()
-    if not VID.fullmatch(vid):
+    if not VID.fullmatch(vid or ""): return None
+    key="a:"+vid; old=get(key,1200)
+    if old: return old
+    if not YTDLP: return None
+    try:
+        with yt_dlp.YoutubeDL(opts()) as y: info=y.extract_info("https://www.youtube.com/watch?v="+vid,download=False) or {}
+        url=info.get("url")
+        if not url:
+            for f in info.get("formats") or []:
+                if f.get("url") and f.get("acodec") not in (None,"none") and f.get("vcodec") in (None,"none"):
+                    url=f["url"]; break
+        if url: put(key,url)
+        return url
+    except Exception as e:
+        print(f"Resolve failed for {vid}: {e}")
         return None
-    key = f"r:{vid}"
-    old = get(key, 900)
-    if old:
-        return old
-    url = resolve_piped(vid) or resolve_cobalt(vid) or resolve_ytdlp(vid)
-    if url:
-        put(key, url)
-    return url
 
 @app.after_request
 def headers(r):
-    r.headers.setdefault("X-Content-Type-Options", "nosniff")
-    r.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
-    r.headers.setdefault("Access-Control-Allow-Origin", "*")
+    r.headers.setdefault("X-Content-Type-Options","nosniff")
+    r.headers.setdefault("Referrer-Policy","strict-origin-when-cross-origin")
     return r
 
 @app.get("/")
-def home():
-    return Response(HTML, mimetype="text/html")
+def home(): return Response(HTML,mimetype="text/html")
 
 @app.get("/api/health")
-def health():
-    return jsonify(ok=True, yt_dlp=YTDLP, cache=len(cache))
+def health(): return jsonify(ok=True,yt_dlp=YTDLP,cache=len(cache))
 
 @app.get("/api/search")
 def api_search():
-    q = (request.args.get("q") or "").strip()
-    if not q:
-        return jsonify(ok=False, error="Enter a song or artist"), 400
-    try:
-        limit = max(1, min(int(request.args.get("limit", 30)), 40))
-    except ValueError:
-        limit = 30
-    rows = search(q, limit)
-    return jsonify(ok=True, results=rows, count=len(rows))
+    if not YTDLP: return jsonify(ok=False,error="yt-dlp is not installed"),500
+    q=(request.args.get("q") or "").strip()
+    if not q: return jsonify(ok=False,error="Enter a song or artist"),400
+    try: limit=max(1,min(int(request.args.get("limit",30)),40))
+    except ValueError: limit=30
+    rows=search(q,limit)
+    return jsonify(ok=True,results=rows,count=len(rows))
 
 @app.get("/api/trending")
 def api_trending():
-    rows = get("trending", 1800)
-    if rows is None:
-        rows = trending()
-        put("trending", rows)
-    return jsonify(ok=True, results=rows or [], count=len(rows or []))
+    if not YTDLP: return jsonify(ok=False,error="yt-dlp is not installed"),500
+    rows=get("trending",1800)
+    if rows is None: rows=trending(); put("trending",rows)
+    return jsonify(ok=True,results=rows,count=len(rows))
 
 @app.get("/api/resolve")
 def api_resolve():
-    vid = (request.args.get("id") or "").strip()
-    if not VID.fullmatch(vid):
-        return jsonify(ok=False, error="Invalid video ID"), 400
-    url = resolve(vid)
-    if not url:
-        return jsonify(
-            ok=False,
-            error="Could not prepare audio. Try another track or redeploy with latest build.",
-        ), 502
-    return jsonify(ok=True, url=url)
+    vid=(request.args.get("id") or "").strip()
+    if not VID.fullmatch(vid): return jsonify(ok=False,error="Invalid video ID"),400
+    url=resolve(vid)
+    if not url: return jsonify(ok=False,error="Could not prepare audio. Update yt-dlp and try another track."),502
+    return jsonify(ok=True,url=url)
 
 HTML = r"""<!doctype html><html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
